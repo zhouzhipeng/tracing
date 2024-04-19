@@ -34,10 +34,12 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
+use std::cmp::max;
 use time::{format_description, Date, Duration, OffsetDateTime, Time};
 
 mod builder;
 pub use builder::{Builder, InitError};
+
 
 /// A file appender with the ability to rotate log files at a fixed schedule.
 ///
@@ -108,6 +110,7 @@ struct Inner {
     rotation: Rotation,
     next_date: AtomicUsize,
     max_files: Option<usize>,
+    max_size: Option<u64>,
 }
 
 // === impl RollingFileAppender ===
@@ -190,6 +193,7 @@ impl RollingFileAppender {
             ref prefix,
             ref suffix,
             ref max_files,
+            ref max_size,
         } = builder;
         let directory = directory.as_ref().to_path_buf();
         let now = OffsetDateTime::now_utc();
@@ -200,6 +204,7 @@ impl RollingFileAppender {
             prefix.clone(),
             suffix.clone(),
             *max_files,
+            *max_size,
         )?;
         Ok(Self {
             state,
@@ -223,6 +228,18 @@ impl io::Write for RollingFileAppender {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let now = self.now();
         let writer = self.writer.get_mut();
+
+        //check if file size is too big
+        if let Some(max_size) = self.state.max_size{
+            let file_size =  writer.metadata()?.len();
+            if file_size >=max_size{
+                eprintln!("file size is too large ,will truncate it , file_size :{} , max_size : {}", file_size, max_size);
+                writer.set_len(0)?;
+            }
+        }
+
+
+
         if let Some(current_time) = self.state.should_rollover(now) {
             let _did_cas = self.state.advance_date(now, current_time);
             debug_assert!(_did_cas, "if we have &mut access to the appender, no other thread can have advanced the timestamp...");
@@ -240,6 +257,7 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for RollingFileAppender
     type Writer = RollingWriter<'a>;
     fn make_writer(&'a self) -> Self::Writer {
         let now = self.now();
+
 
         // Should we try to roll over the log file?
         if let Some(current_time) = self.state.should_rollover(now) {
@@ -525,6 +543,7 @@ impl Inner {
         log_filename_prefix: Option<String>,
         log_filename_suffix: Option<String>,
         max_files: Option<usize>,
+        max_size: Option<u64>,
     ) -> Result<(Self, RwLock<File>), builder::InitError> {
         let log_directory = directory.as_ref().to_path_buf();
         let date_format = rotation.date_format();
@@ -542,6 +561,7 @@ impl Inner {
             ),
             rotation,
             max_files,
+            max_size,
         };
         let filename = inner.join_date(&now);
         let writer = RwLock::new(create_writer(inner.log_directory.as_ref(), &filename)?);
@@ -829,6 +849,7 @@ mod test {
                 prefix.map(ToString::to_string),
                 suffix.map(ToString::to_string),
                 None,
+                None,
             )
             .unwrap();
             let path = inner.join_date(&now);
@@ -941,6 +962,7 @@ mod test {
             Some("test_make_writer".to_string()),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1023,6 +1045,111 @@ mod test {
             Some("test_max_log_files".to_string()),
             None,
             Some(2),
+            None,
+        )
+        .unwrap();
+
+        let clock = Arc::new(Mutex::new(now));
+        let now = {
+            let clock = clock.clone();
+            Box::new(move || *clock.lock().unwrap())
+        };
+        let appender = RollingFileAppender { state, writer, now };
+        let default = tracing_subscriber::fmt()
+            .without_time()
+            .with_level(false)
+            .with_target(false)
+            .with_max_level(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with_writer(appender)
+            .finish()
+            .set_default();
+
+        tracing::info!("file 1");
+
+        // advance time by one second
+        (*clock.lock().unwrap()) += Duration::seconds(1);
+
+        tracing::info!("file 1");
+
+        // advance time by one hour
+        (*clock.lock().unwrap()) += Duration::hours(1);
+
+        // depending on the filesystem, the creation timestamp's resolution may
+        // be as coarse as one second, so we need to wait a bit here to ensure
+        // that the next file actually is newer than the old one.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        tracing::info!("file 2");
+
+        // advance time by one second
+        (*clock.lock().unwrap()) += Duration::seconds(1);
+
+        tracing::info!("file 2");
+
+        // advance time by one hour
+        (*clock.lock().unwrap()) += Duration::hours(1);
+
+        // again, sleep to ensure that the creation timestamps actually differ.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        tracing::info!("file 3");
+
+        // advance time by one second
+        (*clock.lock().unwrap()) += Duration::seconds(1);
+
+        tracing::info!("file 3");
+
+        drop(default);
+
+        let dir_contents = fs::read_dir(directory.path()).expect("Failed to read directory");
+        println!("dir={:?}", dir_contents);
+
+        for entry in dir_contents {
+            println!("entry={:?}", entry);
+            let path = entry.expect("Expected dir entry").path();
+            let file = fs::read_to_string(&path).expect("Failed to read file");
+            println!("path={}\nfile={:?}", path.display(), file);
+
+            match path
+                .extension()
+                .expect("found a file without a date!")
+                .to_str()
+                .expect("extension should be UTF8")
+            {
+                "2020-02-01-10" => {
+                    panic!("this file should have been pruned already!");
+                }
+                "2020-02-01-11" => {
+                    assert_eq!("file 2\nfile 2\n", file);
+                }
+                "2020-02-01-12" => {
+                    assert_eq!("file 3\nfile 3\n", file);
+                }
+                x => panic!("unexpected date {}", x),
+            }
+        }
+    }
+    #[test]
+    fn test_max_size_files() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::*;
+
+        let format = format_description::parse(
+            "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour \
+         sign:mandatory]:[offset_minute]:[offset_second]",
+        )
+        .unwrap();
+
+        let now = OffsetDateTime::parse("2020-02-01 10:01:00 +00:00:00", &format).unwrap();
+        let directory = tempfile::tempdir().expect("failed to create tempdir");
+        let (state, writer) = Inner::new(
+            now,
+            Rotation::HOURLY,
+            directory.path(),
+            Some("test_max_log_files".to_string()),
+            None,
+            Some(2),
+            Some(1),
         )
         .unwrap();
 

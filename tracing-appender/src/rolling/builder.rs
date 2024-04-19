@@ -11,6 +11,7 @@ pub struct Builder {
     pub(super) prefix: Option<String>,
     pub(super) suffix: Option<String>,
     pub(super) max_files: Option<usize>,
+    pub(super) max_size: Option<u64>,
 }
 
 /// Errors returned by [`Builder::build`].
@@ -54,6 +55,7 @@ impl Builder {
             prefix: None,
             suffix: None,
             max_files: None,
+            max_size: None,
         }
     }
 
@@ -229,6 +231,13 @@ impl Builder {
     pub fn max_log_files(self, n: usize) -> Self {
         Self {
             max_files: Some(n),
+            ..self
+        }
+    }
+    #[must_use]
+    pub fn max_file_size(self, n: u64) -> Self {
+        Self {
+            max_size: Some(n),
             ..self
         }
     }
