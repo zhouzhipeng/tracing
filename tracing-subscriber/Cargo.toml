@@ -25,17 +25,20 @@ rust-version = "1.63.0"
 [features]
 
 default = ["smallvec", "fmt", "ansi", "tracing-log", "std"]
-alloc = ["tracing-core/alloc"]
+alloc = ["tracing-core/alloc", "portable-atomic-util?/alloc"]
 std = ["alloc", "tracing-core/std"]
 env-filter = ["matchers", "regex", "once_cell", "tracing", "std", "thread_local"]
 fmt = ["registry", "std"]
 ansi = ["fmt", "nu-ansi-term"]
 registry = ["sharded-slab", "thread_local", "std"]
 json = ["tracing-serde", "serde", "serde_json"]
+portable-atomic = ["dep:portable-atomic-util", "tracing-core/portable-atomic", "tracing?/portable-atomic", "tracing-serde?/portable-atomic"]
+critical-section = ["tracing-core/critical-section", "tracing?/critical-section", "tracing-serde?/critical-section"]
 
 # Enables support for local time when using the `time` crate timestamp
 # formatters.
 local-time = ["time/local-offset"]
+nu-ansi-term = ["dep:nu-ansi-term"]
 
 [dependencies]
 tracing-core = { path = "../tracing-core", version = "0.2", default-features = false }
@@ -65,12 +68,15 @@ chrono = { version = "0.4.26", default-features = false, features = ["clock", "s
 sharded-slab = { version = "0.1.4", optional = true }
 thread_local = { version = "1.1.4", optional = true }
 
+# portable-atomic
+portable-atomic-util = { version = "0.2.4", default-features = false, optional = true }
+
 [dev-dependencies]
 tracing = { path = "../tracing", version = "0.2" }
 tracing-mock = { path = "../tracing-mock", features = ["tracing-subscriber"] }
 log = "0.4.17"
 tracing-log = { path = "../tracing-log", version = "0.2" }
-criterion = { version = "0.3.6", default_features = false }
+criterion = { version = "0.3.6", default-features = false }
 regex = { version = "1.6.0", default-features = false, features = ["std"] }
 tracing-futures = { path = "../tracing-futures", version = "0.3", default-features = false, features = ["std-future", "std"] }
 tokio = { version = "1.20.0", features = ["rt", "macros"] }
@@ -103,6 +109,5 @@ harness = false
 name = "enter"
 harness = false
 
-[[bench]]
-name = "reload"
-harness = false
+[lints]
+workspace = true
